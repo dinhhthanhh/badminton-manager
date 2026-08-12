@@ -1,12 +1,27 @@
 import { Resend } from 'resend';
+import nodemailer from 'nodemailer';
 import { APP_CONFIG } from '@/lib/config';
 
+// 1. Gmail SMTP Transporter (Free 500 emails/day to ANY user without custom domain)
+const smtpUser = process.env.SMTP_USER || process.env.GMAIL_USER;
+const smtpPass = process.env.SMTP_PASS || process.env.GMAIL_PASS;
+
+const smtpTransporter = smtpUser && smtpPass
+  ? nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: smtpUser.trim(),
+        pass: smtpPass.trim().replace(/\s+/g, ''), // Strip spaces from App Password
+      },
+    })
+  : null;
+
+// 2. Resend Client Fallback
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
 const FROM_EMAIL = process.env.EMAIL_FROM || `${APP_CONFIG.name} <onboarding@resend.dev>`;
-// Resend free tier owner email for fallback delivery in dev mode
 const DEV_TEST_EMAIL = 'thanh.nd225670@outlook.com';
 
 interface EmailOptions {
@@ -16,53 +31,67 @@ interface EmailOptions {
 }
 
 /**
- * Send an email via Resend.
- * Gracefully handles missing API key or free tier sandbox restrictions.
+ * Send email using Gmail SMTP (Primary) or Resend (Fallback).
+ * Gmail SMTP can send emails directly to ANY user email address (@gmail.com, @yahoo.com...) for FREE!
  */
 export async function sendEmail(options: EmailOptions): Promise<boolean> {
-  if (!resend) {
-    console.warn('[Email Warning] RESEND_API_KEY chưa được cấu hình trong .env.local. Email không thể gửi:', options.subject);
-    return false;
+  // Option A: Send via Gmail SMTP if configured
+  if (smtpTransporter && smtpUser) {
+    try {
+      const info = await smtpTransporter.sendMail({
+        from: `"${APP_CONFIG.name}" <${smtpUser.trim()}>`,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+      });
+
+      console.log('[Gmail SMTP Success]: Sent email to', options.to, '| MessageId:', info.messageId);
+      return true;
+    } catch (err: unknown) {
+      console.error('[Gmail SMTP Error]: Failed to send to', options.to, err);
+      // Fall through to Resend fallback if available
+    }
   }
 
-  try {
-    // Attempt sending to target email
-    const { data, error } = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: options.to,
-      subject: options.subject,
-      html: options.html,
-    });
+  // Option B: Send via Resend if configured
+  if (resend) {
+    try {
+      const { data, error } = await resend.emails.send({
+        from: FROM_EMAIL,
+        to: options.to,
+        subject: options.subject,
+        html: options.html,
+      });
 
-    if (error) {
-      console.warn(`[Email Resend Warning] Không thể gửi tới ${options.to}:`, error.message);
+      if (error) {
+        console.warn(`[Resend Warning] Không thể gửi tới ${options.to}:`, error.message);
 
-      // If Resend free tier restricts recipient to account owner, retry sending to DEV_TEST_EMAIL
-      if (error.message?.includes('only send to your own email') && options.to !== DEV_TEST_EMAIL) {
-        console.log(`[Email Dev Fallback] Đang gửi lại Email xem thử tới hòm thư Resend Owner: ${DEV_TEST_EMAIL}`);
-        const fallbackRes = await resend.emails.send({
-          from: FROM_EMAIL,
-          to: DEV_TEST_EMAIL,
-          subject: `[DEV TEST -> ${options.to}] ${options.subject}`,
-          html: `<div style="background:#fef3c7;padding:12px;border-radius:8px;margin-bottom:16px;font-size:12px;color:#92400e;">
-            <strong>⚠️ [DEV MODE NOTICE]</strong> Email này gốc được gửi tới <code>${options.to}</code>. Do tài khoản Resend chưa Verify Domain custom nên được chuyển tiếp tới hòm thư thử nghiệm của bạn để bạn xem nội dung.
-          </div>` + options.html,
-        });
+        // Fallback for Resend free sandbox tier
+        if (error.message?.includes('only send to your own email') && options.to !== DEV_TEST_EMAIL) {
+          const fallbackRes = await resend.emails.send({
+            from: FROM_EMAIL,
+            to: DEV_TEST_EMAIL,
+            subject: `[DEV TEST -> ${options.to}] ${options.subject}`,
+            html: `<div style="background:#fef3c7;padding:12px;border-radius:8px;margin-bottom:16px;font-size:12px;color:#92400e;">
+              <strong>⚠️ [DEV MODE NOTICE]</strong> Email này được chuyển tiếp tới <code>${DEV_TEST_EMAIL}</code> do cấu hình SMTP chưa hoàn tất.
+            </div>` + options.html,
+          });
 
-        if (!fallbackRes.error) {
-          console.log('[Email Dev Fallback Success]: ID', fallbackRes.data?.id);
-          return true;
+          if (!fallbackRes.error) return true;
         }
+        return false;
       }
+
+      console.log('[Resend Success]:', data?.id, '-> Target:', options.to);
+      return true;
+    } catch (error) {
+      console.error('[Resend Exception]:', error);
       return false;
     }
-
-    console.log('[Email Sent Success]:', data?.id, '-> Target:', options.to);
-    return true;
-  } catch (error) {
-    console.error('[Email Exception]:', error);
-    return false;
   }
+
+  console.warn('[Email Notice] Chưa cấu hình SMTP_USER/SMTP_PASS hoặc RESEND_API_KEY. Bỏ qua gửi email:', options.subject);
+  return false;
 }
 
 // ─── Email Templates ────────────────────────────────────────────────
@@ -94,6 +123,7 @@ const baseTemplate = (content: string) => `
     </div>
     <div class="footer">
       <p>${APP_CONFIG.name} · ${APP_CONFIG.subtitle}</p>
+    </div>
     </div>
   </div>
 </body>
