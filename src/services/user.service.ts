@@ -6,6 +6,28 @@ import { revalidatePath } from 'next/cache';
 import type { Profile } from '@/types';
 
 /**
+ * Helper to fetch extended profile fields stored in app_settings fallback
+ */
+async function getProfileExtension(userId: string): Promise<Partial<Profile>> {
+  try {
+    const adminClient = createAdminClient();
+    const { data } = await adminClient
+      .from('app_settings')
+      .select('value')
+      .eq('key', `user_profile_ext_${userId}`)
+      .maybeSingle();
+
+    if (data?.value) {
+      const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+      return parsed as Partial<Profile>;
+    }
+  } catch {
+    // fallback
+  }
+  return {};
+}
+
+/**
  * Get the current user's profile.
  * Auto-creates profile if user exists in auth but profile is missing.
  */
@@ -40,23 +62,20 @@ export async function getCurrentProfile(): Promise<Profile | null> {
 
     if (!error && newProfile) {
       profile = newProfile;
-
-      // Notify admins via email about new pending member
-      try {
-        const { sendAdminNewMemberPendingEmail } = await import('./email.service');
-        const { data: admins } = await adminClient.from('profiles').select('email').eq('role', 'ADMIN');
-        const adminEmails = (admins || []).map((a) => a.email).filter(Boolean);
-
-        for (const adminEmail of adminEmails) {
-          await sendAdminNewMemberPendingEmail(adminEmail, profile.full_name, profile.email, false);
-        }
-      } catch (err) {
-        console.error('[getCurrentProfile] Failed to send admin email:', err);
-      }
     }
   }
 
-  return profile;
+  if (!profile) return null;
+
+  // Merge with app_settings fallback for extended fields if missing
+  const ext = await getProfileExtension(user.id);
+  return {
+    ...profile,
+    skill_level: profile.skill_level || ext.skill_level || 'INTERMEDIATE',
+    play_frequency: profile.play_frequency || ext.play_frequency || '',
+    preferred_time_slots: profile.preferred_time_slots || ext.preferred_time_slots || [],
+    bio: profile.bio || ext.bio || '',
+  } as Profile;
 }
 
 /**
@@ -78,7 +97,6 @@ export async function resendApprovalRequest(): Promise<{ success: boolean; error
     if (!profile) return { success: false, error: 'Không tìm thấy tài khoản' };
     if (profile.status === 'APPROVED') return { success: false, error: 'Tài khoản đã được duyệt' };
 
-    // Update created_at timestamp to reset timer and set status back to PENDING
     const nowIso = new Date().toISOString();
     await adminClient
       .from('profiles')
@@ -89,7 +107,6 @@ export async function resendApprovalRequest(): Promise<{ success: boolean; error
       })
       .eq('id', user.id);
 
-    // Send email alert to admins
     const { sendAdminNewMemberPendingEmail } = await import('./email.service');
     const { data: admins } = await adminClient.from('profiles').select('email').eq('role', 'ADMIN');
     const adminEmails = (admins || []).map((a) => a.email).filter(Boolean);
@@ -102,15 +119,23 @@ export async function resendApprovalRequest(): Promise<{ success: boolean; error
     revalidatePath('/blocked');
     revalidatePath('/admin/members');
     return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message || 'Gửi yêu cầu thất bại' };
+  } catch (e: unknown) {
+    return { success: false, error: e instanceof Error ? e.message : 'Gửi yêu cầu thất bại' };
   }
 }
 
 /**
- * Update current user's profile full_name
+ * Update current user's profile
  */
-export async function updateUserProfile(fullName: string): Promise<void> {
+export async function updateUserProfile(
+  fullName: string,
+  extra?: {
+    skillLevel?: string;
+    playFrequency?: string;
+    preferredTimeSlots?: string[];
+    bio?: string;
+  }
+): Promise<void> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Chưa đăng nhập');
@@ -120,15 +145,74 @@ export async function updateUserProfile(fullName: string): Promise<void> {
   }
 
   const adminClient = createAdminClient();
+
+  // Save extended fields in app_settings fallback first to guarantee persistence
+  const extData = {
+    skill_level: extra?.skillLevel || 'INTERMEDIATE',
+    play_frequency: extra?.playFrequency || '',
+    preferred_time_slots: extra?.preferredTimeSlots || [],
+    bio: extra?.bio || '',
+  };
+
+  await adminClient.from('app_settings').upsert({
+    key: `user_profile_ext_${user.id}`,
+    value: JSON.stringify(extData),
+    updated_by: user.id,
+  });
+
+  // Try updating profiles table directly (handling cases where new columns exist or don't exist yet)
+  const updatePayload: Record<string, unknown> = {
+    full_name: fullName.trim(),
+  };
+
+  if (extra?.skillLevel) updatePayload.skill_level = extra.skillLevel;
+  if (extra?.playFrequency !== undefined) updatePayload.play_frequency = extra.playFrequency;
+  if (extra?.preferredTimeSlots) updatePayload.preferred_time_slots = extra.preferredTimeSlots;
+  if (extra?.bio !== undefined) updatePayload.bio = extra.bio;
+
   const { error } = await adminClient
     .from('profiles')
-    .update({ full_name: fullName.trim() })
+    .update(updatePayload)
     .eq('id', user.id);
 
-  if (error) throw new Error(error.message || 'Cập nhật thất bại');
+  if (error) {
+    // Fallback: update only full_name on profiles table if new columns are not in schema cache
+    await adminClient
+      .from('profiles')
+      .update({ full_name: fullName.trim() })
+      .eq('id', user.id);
+  }
 
   revalidatePath('/profile');
   revalidatePath('/dashboard');
+}
+
+/**
+ * Get public profile of any user
+ */
+export async function getPublicUserProfile(targetUserId: string): Promise<Profile | null> {
+  try {
+    const adminClient = createAdminClient();
+    const { data: profile } = await adminClient
+      .from('profiles')
+      .select('*')
+      .eq('id', targetUserId)
+      .maybeSingle();
+
+    if (!profile) return null;
+
+    const ext = await getProfileExtension(targetUserId);
+
+    return {
+      ...profile,
+      skill_level: profile.skill_level || ext.skill_level || 'INTERMEDIATE',
+      play_frequency: profile.play_frequency || ext.play_frequency || '',
+      preferred_time_slots: profile.preferred_time_slots || ext.preferred_time_slots || [],
+      bio: profile.bio || ext.bio || '',
+    } as Profile;
+  } catch {
+    return null;
+  }
 }
 
 /**

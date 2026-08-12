@@ -4,59 +4,92 @@ import { useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog';
+import { Separator } from '@/components/ui/separator';
 import { formatVND } from '@/lib/utils/money';
-import { formatDate, formatTime } from '@/lib/utils/date';
+import { formatTime } from '@/lib/utils/date';
 import { markPaymentAsPaid } from '@/services/payment.service';
-import { submitCourtBill, getCourtBills, type CourtBillRecord } from '@/services/bill.service';
 import { CourtSvgIcon, ShuttlecockSvgIcon, DrinkSvgIcon, WalletMoneySvgIcon } from '@/components/icons/custom-svg-icons';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import type { PaymentWithDetails } from '@/types';
-import { CreditCard, CheckCircle2, Clock, XCircle, Loader2, PieChart, Info, PlusCircle, AlertCircle } from 'lucide-react';
+import { format } from 'date-fns';
+import { vi } from 'date-fns/locale';
+import type { SessionWithDetails, PaymentWithDetails } from '@/types';
+import type { SessionCostDetail } from '@/services/bill.service';
+import {
+  Clock, MapPin, Users, Loader2, Eye, CheckCircle2,
+  CalendarOff, BadgeInfo, CreditCard, UserPlus,
+} from 'lucide-react';
 
 interface Props {
   payments: PaymentWithDetails[];
+  sessions: SessionWithDetails[];
+  costDetails: Record<string, SessionCostDetail>;
+  userId: string;
 }
 
-export function PaymentsClient({ payments }: Props) {
+// Helper: compute cost totals from detail
+function computeTotals(detail: SessionCostDetail | null) {
+  if (!detail) return { court: 0, shuttle: 0, water: 0, total: 0 };
+  const court = detail.courtHourlyRate * detail.courtHours;
+  const shuttle = detail.shuttlecockTypes.reduce((s, t) => s + t.quantity * t.pricePerUnit, 0);
+  const water = detail.waterCost;
+  return { court, shuttle, water, total: court + shuttle + water };
+}
+
+// Helper: compute per-player cost
+function computePlayerCosts(
+  detail: SessionCostDetail | null,
+  attendees: { userId: string; name: string; setsPlayed: number }[]
+) {
+  const totals = computeTotals(detail);
+  if (totals.total === 0 || attendees.length === 0) return [];
+
+  const allPlayers = [
+    ...attendees,
+    ...(detail?.walkInPlayers || []).map((w) => ({
+      userId: `walkin_${w.id}`,
+      name: w.name,
+      setsPlayed: w.setsPlayed,
+    })),
+  ];
+
+  const totalSets = allPlayers.reduce((s, p) => s + p.setsPlayed, 0);
+  if (totalSets === 0) {
+    const n = allPlayers.length;
+    return allPlayers.map((p) => ({
+      ...p,
+      courtShare: Math.round(totals.court / n),
+      shuttleShare: Math.round(totals.shuttle / n),
+      waterShare: Math.round(totals.water / n),
+      totalShare: Math.round(totals.total / n),
+    }));
+  }
+
+  return allPlayers.map((p) => {
+    const ratio = p.setsPlayed / totalSets;
+    return {
+      ...p,
+      courtShare: Math.round(totals.court * ratio),
+      shuttleShare: Math.round(totals.shuttle * ratio),
+      waterShare: Math.round(totals.water * ratio),
+      totalShare: Math.round(totals.total * ratio),
+    };
+  });
+}
+
+export function PaymentsClient({ payments, sessions, costDetails, userId }: Props) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
-  const [filter, setFilter] = useState('ALL');
-  const [summaryDialogOpen, setSummaryDialogOpen] = useState(false);
-  const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
-
-  // Form state for Submitting Court Bill
-  const [billDate, setBillDate] = useState(new Date().toISOString().split('T')[0]);
-  const [courtCost, setCourtCost] = useState('');
-  const [shuttleCost, setShuttleCost] = useState('');
-  const [otherCost, setOtherCost] = useState('');
-  const [billNotes, setBillNotes] = useState('');
-  const [submittingBill, setSubmittingBill] = useState(false);
-
-  const filtered = filter === 'ALL'
-    ? payments
-    : payments.filter((p) => p.status === filter);
-
-  // Grand totals across all payments for breakdown
-  const totalCourtShare = payments.reduce((sum, p) => sum + (p.court_share || 0), 0);
-  const totalShuttleShare = payments.reduce((sum, p) => sum + (p.shuttlecock_share || 0), 0);
-  const totalOtherShare = payments.reduce((sum, p) => sum + (p.other_share || 0), 0);
-  const grandTotal = payments.reduce((sum, p) => sum + (p.total_amount || 0), 0);
-
-  const outstanding = payments
-    .filter((p) => p.status === 'PENDING')
-    .reduce((sum, p) => sum + p.total_amount, 0);
+  const [detailDialog, setDetailDialog] = useState<string | null>(null);
 
   const handleMarkPaid = async (paymentId: string) => {
     setLoading(paymentId);
     try {
       const result = await markPaymentAsPaid(paymentId);
       if (result.success) {
-        toast.success('Đã xác nhận thanh toán');
+        toast.success('Đã xác nhận chuyển khoản!');
         router.refresh();
       } else {
         toast.error(result.error || 'Cập nhật thất bại');
@@ -68,248 +101,43 @@ export function PaymentsClient({ payments }: Props) {
     }
   };
 
-  const handleSubmitBill = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmittingBill(true);
+  // Calculate outstanding total
+  const outstanding = payments
+    .filter((p) => p.status === 'PENDING')
+    .reduce((sum, p) => sum + p.total_amount, 0);
 
-    try {
-      const res = await submitCourtBill({
-        date: billDate,
-        courtCost: parseFloat(courtCost) || 0,
-        shuttlecockCost: parseFloat(shuttleCost) || 0,
-        otherCost: parseFloat(otherCost) || 0,
-        notes: billNotes,
-      });
+  // Group sessions by week
+  const today = format(new Date(), 'yyyy-MM-dd');
 
-      if (res.success) {
-        toast.success('Đã gửi hóa đơn tiền sân! Đang chờ Admin duyệt.');
-        setSubmitDialogOpen(false);
-        setCourtCost('');
-        setShuttleCost('');
-        setOtherCost('');
-        setBillNotes('');
-        router.refresh();
-      } else {
-        toast.error(res.error || 'Đăng tiền sân thất bại');
-      }
-    } catch {
-      toast.error('Có lỗi xảy ra');
-    } finally {
-      setSubmittingBill(false);
-    }
-  };
+  // Filter sessions that have cost data
+  const sessionsWithCosts = sessions.filter((s) => {
+    const detail = costDetails[s.id];
+    return detail && (detail.courtHourlyRate > 0 || detail.shuttlecockTypes.length > 0 || detail.waterCost > 0);
+  });
 
-  const statusBadge = (status: string) => {
-    switch (status) {
-      case 'PENDING':
-        return <Badge variant="secondary" className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"><Clock className="h-3 w-3 mr-1" />Chờ thanh toán</Badge>;
-      case 'PAID':
-        return <Badge variant="secondary" className="bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"><CheckCircle2 className="h-3 w-3 mr-1" />Đã chuyển khoản</Badge>;
-      case 'VERIFIED':
-        return <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-400"><CheckCircle2 className="h-3 w-3 mr-1" />Đã xác nhận</Badge>;
-      case 'REJECTED':
-        return <Badge variant="destructive"><XCircle className="h-3 w-3 mr-1" />Bị từ chối</Badge>;
-      default:
-        return <Badge variant="secondary">{status}</Badge>;
-    }
-  };
+  const sessionsWithoutCosts = sessions.filter((s) => {
+    const detail = costDetails[s.id];
+    return !detail || (detail.courtHourlyRate === 0 && detail.shuttlecockTypes.length === 0 && detail.waterCost === 0);
+  });
+
+  if (sessions.length === 0) {
+    return (
+      <Card className="p-12 text-center">
+        <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mx-auto mb-4">
+          <CalendarOff className="h-8 w-8 text-muted-foreground" />
+        </div>
+        <h3 className="font-semibold text-base mb-1">
+          Chưa có buổi đánh nào gần đây
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          Bạn chưa tham gia buổi đánh cầu nào trong thời gian gần đây.
+        </p>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-6">
-      {/* Cost Summary Breakdown Header Card with Vector SVG Icons */}
-      <Card className="p-5 bg-gradient-to-br from-emerald-500/10 via-card to-emerald-500/5 border-emerald-500/20 shadow-md">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b pb-4 mb-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-600 shrink-0">
-              <PieChart className="h-6 w-6" />
-            </div>
-            <div>
-              <h3 className="font-bold text-base">Tổng hợp Chi phí Tập luyện</h3>
-              <p className="text-xs text-muted-foreground">Phân tích chi tiết tiền sân, tiền cầu và nước ngọt/khác bằng icon SVG</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Member Court Expense Submission Button */}
-            <Dialog open={submitDialogOpen} onOpenChange={setSubmitDialogOpen}>
-              <DialogTrigger className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-md hover:scale-102">
-                <PlusCircle className="h-4 w-4" />
-                Đăng Tiền Sân
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2 text-base font-bold">
-                    <CourtSvgIcon className="w-6 h-6" />
-                    Đăng Hóa Đơn Tiền Sân / Cầu / Nước
-                  </DialogTitle>
-                </DialogHeader>
-
-                <form onSubmit={handleSubmitBill} className="space-y-4 py-2">
-                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200/60 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
-                    <span>
-                      Hệ thống sẽ tự động xác minh (Verify) ngày bạn chọn phải có buổi đánh cầu hợp lệ. Sau khi đăng, hóa đơn sẽ được chuyển cho Admin duyệt.
-                    </span>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Ngày đánh cầu</label>
-                    <Input
-                      type="date"
-                      value={billDate}
-                      onChange={(e) => setBillDate(e.target.value)}
-                      required
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                        <CourtSvgIcon className="w-4 h-4" /> Tiền sân (₫)
-                      </label>
-                      <Input
-                        type="number"
-                        placeholder="150000"
-                        value={courtCost}
-                        onChange={(e) => setCourtCost(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                        <ShuttlecockSvgIcon className="w-4 h-4" /> Tiền cầu (₫)
-                      </label>
-                      <Input
-                        type="number"
-                        placeholder="50000"
-                        value={shuttleCost}
-                        onChange={(e) => setShuttleCost(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                        <DrinkSvgIcon className="w-4 h-4" /> Tiền nước (₫)
-                      </label>
-                      <Input
-                        type="number"
-                        placeholder="20000"
-                        value={otherCost}
-                        onChange={(e) => setOtherCost(e.target.value)}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Ghi chú (Ví dụ: Tiền đặt sân 2 tiếng sân số 3)</label>
-                    <Textarea
-                      placeholder="Nhập ghi chú chi tiết hóa đơn..."
-                      value={billNotes}
-                      onChange={(e) => setBillNotes(e.target.value)}
-                      rows={2}
-                    />
-                  </div>
-
-                  <DialogFooter className="pt-2">
-                    <Button variant="outline" type="button" onClick={() => setSubmitDialogOpen(false)}>
-                      Hủy
-                    </Button>
-                    <Button type="submit" disabled={submittingBill} className="bg-emerald-600 hover:bg-emerald-700">
-                      {submittingBill && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
-                      Gửi Admin Duyệt
-                    </Button>
-                  </DialogFooter>
-                </form>
-              </DialogContent>
-            </Dialog>
-
-            {/* Summary Detail Dialog Trigger */}
-            <Dialog open={summaryDialogOpen} onOpenChange={setSummaryDialogOpen}>
-              <DialogTrigger className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-background border border-input hover:bg-accent transition-colors">
-                <Info className="h-4 w-4 text-emerald-600" />
-                Xem Chi Tiết Tổng Hợp
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2 text-base font-bold">
-                    <PieChart className="h-5 w-5 text-emerald-600" />
-                    Bảng Tổng hợp Chi tiết Chi phí
-                  </DialogTitle>
-                </DialogHeader>
-
-                <div className="space-y-3 py-2">
-                  <div className="p-3.5 rounded-2xl bg-muted/60 space-y-2.5 text-xs border">
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground flex items-center gap-2 font-medium">
-                        <CourtSvgIcon className="w-5 h-5" /> Tiền sân:
-                      </span>
-                      <span className="font-bold text-foreground text-sm">{formatVND(totalCourtShare)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground flex items-center gap-2 font-medium">
-                        <ShuttlecockSvgIcon className="w-5 h-5" /> Tiền cầu:
-                      </span>
-                      <span className="font-bold text-foreground text-sm">{formatVND(totalShuttleShare)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-muted-foreground flex items-center gap-2 font-medium">
-                        <DrinkSvgIcon className="w-5 h-5" /> Tiền nước & khác:
-                      </span>
-                      <span className="font-bold text-foreground text-sm">{formatVND(totalOtherShare)}</span>
-                    </div>
-                    <div className="border-t pt-2 mt-2 flex items-center justify-between text-base font-bold">
-                      <span className="flex items-center gap-2">
-                        <WalletMoneySvgIcon className="w-5 h-5" /> Tổng chi phí:
-                      </span>
-                      <span className="text-emerald-600 dark:text-emerald-400">{formatVND(grandTotal)}</span>
-                    </div>
-                  </div>
-
-                  <p className="text-[11px] text-muted-foreground text-center">
-                    *Chi phí được tính toán tự động dựa trên số buổi bạn tham gia và số séc đấu thực tế.
-                  </p>
-                </div>
-              </DialogContent>
-            </Dialog>
-          </div>
-        </div>
-
-        {/* 4 Vector SVG Cost Summary Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="p-3.5 rounded-2xl bg-card border shadow-2xs space-y-1.5 hover:border-emerald-500/40 transition-colors">
-            <div className="flex items-center gap-2">
-              <CourtSvgIcon className="w-6 h-6 shrink-0" />
-              <p className="text-[11px] text-muted-foreground font-semibold">Tiền sân</p>
-            </div>
-            <p className="text-base sm:text-lg font-bold text-foreground">{formatVND(totalCourtShare)}</p>
-          </div>
-
-          <div className="p-3.5 rounded-2xl bg-card border shadow-2xs space-y-1.5 hover:border-emerald-500/40 transition-colors">
-            <div className="flex items-center gap-2">
-              <ShuttlecockSvgIcon className="w-6 h-6 shrink-0" />
-              <p className="text-[11px] text-muted-foreground font-semibold">Tiền cầu</p>
-            </div>
-            <p className="text-base sm:text-lg font-bold text-foreground">{formatVND(totalShuttleShare)}</p>
-          </div>
-
-          <div className="p-3.5 rounded-2xl bg-card border shadow-2xs space-y-1.5 hover:border-emerald-500/40 transition-colors">
-            <div className="flex items-center gap-2">
-              <DrinkSvgIcon className="w-6 h-6 shrink-0" />
-              <p className="text-[11px] text-muted-foreground font-semibold">Tiền nước / khác</p>
-            </div>
-            <p className="text-base sm:text-lg font-bold text-foreground">{formatVND(totalOtherShare)}</p>
-          </div>
-
-          <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 space-y-1.5 col-span-2 sm:col-span-1 shadow-2xs">
-            <div className="flex items-center gap-2">
-              <WalletMoneySvgIcon className="w-6 h-6 shrink-0" />
-              <p className="text-[11px] text-emerald-800 dark:text-emerald-300 font-bold">Tổng chi phí</p>
-            </div>
-            <p className="text-base sm:text-lg font-bold text-emerald-700 dark:text-emerald-400">{formatVND(grandTotal)}</p>
-          </div>
-        </div>
-      </Card>
-
       {/* Outstanding Amount Warning */}
       {outstanding > 0 && (
         <Card className="p-4 border-amber-200 bg-amber-50/50 dark:bg-amber-950/10 dark:border-amber-900/30">
@@ -318,95 +146,305 @@ export function PaymentsClient({ payments }: Props) {
               <CreditCard className="h-5 w-5 text-amber-600" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground font-medium">Tổng tiền còn nợ cần thanh toán</p>
+              <p className="text-xs text-muted-foreground font-medium">Tổng tiền còn cần thanh toán</p>
               <p className="text-xl font-bold text-amber-700 dark:text-amber-400">{formatVND(outstanding)}</p>
             </div>
           </div>
         </Card>
       )}
 
-      {/* Filter Tabs */}
-      <Tabs value={filter} onValueChange={setFilter}>
-        <TabsList>
-          <TabsTrigger value="ALL">Tất cả</TabsTrigger>
-          <TabsTrigger value="PENDING">Chờ thanh toán</TabsTrigger>
-          <TabsTrigger value="PAID">Đã chuyển khoản</TabsTrigger>
-          <TabsTrigger value="VERIFIED">Đã xác nhận</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      {/* Sessions with Costs */}
+      {sessionsWithCosts.map((session) => {
+        const detail = costDetails[session.id];
+        const totals = computeTotals(detail);
 
-      {/* Payments List */}
-      {filtered.length === 0 ? (
-        <Card className="p-8 text-center">
-          <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mx-auto mb-4">
-            <CreditCard className="h-8 w-8 text-muted-foreground" />
-          </div>
-          <h3 className="font-semibold mb-1">Chưa có khoản thanh toán nào</h3>
-          <p className="text-sm text-muted-foreground">
-            Không tìm thấy lịch sử thanh toán.
-          </p>
-        </Card>
-      ) : (
-        <div className="grid gap-3">
-          {filtered.map((payment) => (
-            <Card key={payment.id} className="p-4 sm:p-5 hover:border-primary/40 transition-all">
+        const attendees = session.registrations
+          .filter((r) => r.status === 'ATTENDED')
+          .map((r) => ({
+            userId: r.user_id,
+            name: r.profiles.full_name,
+            setsPlayed: r.sets_played,
+            avatar: r.profiles.avatar_url,
+          }));
+
+        const playerCosts = computePlayerCosts(
+          detail,
+          attendees.map((a) => ({ userId: a.userId, name: a.name, setsPlayed: a.setsPlayed }))
+        );
+
+        const myCost = playerCosts.find((pc) => pc.userId === userId);
+        const myReg = session.registrations.find((r) => r.user_id === userId);
+        const sessionPayment = payments.find((p) => p.session_id === session.id);
+        const totalSets = playerCosts.reduce((s, p) => s + p.setsPlayed, 0);
+
+        if (!myCost) return null;
+
+        return (
+          <Card key={session.id} className="overflow-hidden hover:border-emerald-500/30 transition-all">
+            {/* Session Header */}
+            <div className="p-4 sm:p-5">
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div>
-                  <p className="font-bold text-sm sm:text-base">
-                    {formatDate(payment.sessions.date)}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {formatTime(payment.sessions.start_time)} - {formatTime(payment.sessions.end_time)} · {payment.sessions.court_name}
-                  </p>
+                  <h3 className="font-bold text-sm sm:text-base">
+                    {format(new Date(session.date + 'T00:00:00'), 'EEEE, dd/MM/yyyy', { locale: vi })}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground mt-1">
+                    <span className="flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {formatTime(session.start_time)} - {formatTime(session.end_time)}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <MapPin className="h-3 w-3" />
+                      {session.court_name}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Users className="h-3 w-3" />
+                      {attendees.length} người
+                    </span>
+                  </div>
                 </div>
-                {statusBadge(payment.status)}
+
+                {sessionPayment && (
+                  <Badge
+                    variant="secondary"
+                    className={`text-[10px] shrink-0 ${
+                      sessionPayment.status === 'VERIFIED'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : sessionPayment.status === 'PAID'
+                          ? 'bg-blue-100 text-blue-700'
+                          : sessionPayment.status === 'REJECTED'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-amber-100 text-amber-700'
+                    }`}
+                  >
+                    {sessionPayment.status === 'VERIFIED' && <><CheckCircle2 className="h-3 w-3 mr-0.5" /> Đã xác nhận</>}
+                    {sessionPayment.status === 'PAID' && 'Chờ Admin duyệt'}
+                    {sessionPayment.status === 'PENDING' && 'Chờ thanh toán'}
+                    {sessionPayment.status === 'REJECTED' && 'Bị từ chối'}
+                  </Badge>
+                )}
               </div>
 
-              {/* Itemized breakdown per session with vector SVG icons */}
-              <div className="grid grid-cols-3 gap-2 text-xs sm:text-sm p-3 rounded-xl bg-muted/40 mb-3 border">
-                <div className="flex items-center gap-1.5">
-                  <CourtSvgIcon className="w-4 h-4 shrink-0" />
-                  <div>
-                    <p className="text-[10px] text-muted-foreground">Tiền sân</p>
-                    <p className="font-semibold">{formatVND(payment.court_share)}</p>
-                  </div>
+              {/* My Cost Breakdown */}
+              <div className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-50/80 via-card to-emerald-50/30 dark:from-emerald-950/20 dark:via-card dark:to-emerald-950/10 border border-emerald-200/40 space-y-2.5 mb-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                    <CourtSvgIcon className="w-4 h-4" />
+                    Sân ({formatVND(detail.courtHourlyRate)}/giờ × {detail.courtHours}h)
+                  </span>
+                  <span className="font-semibold">{formatVND(myCost.courtShare)}</span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <ShuttlecockSvgIcon className="w-4 h-4 shrink-0" />
-                  <div>
-                    <p className="text-[10px] text-muted-foreground">Tiền cầu</p>
-                    <p className="font-semibold">{formatVND(payment.shuttlecock_share)}</p>
+
+                {detail.shuttlecockTypes.length > 0 && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="flex items-center gap-1.5 text-muted-foreground">
+                      <ShuttlecockSvgIcon className="w-4 h-4" />
+                      Cầu ({detail.shuttlecockTypes.map((st) =>
+                        `${st.name || 'Cầu'} ${st.quantity}q`
+                      ).join(', ')})
+                    </span>
+                    <span className="font-semibold">{formatVND(myCost.shuttleShare)}</span>
                   </div>
+                )}
+
+                {totals.water > 0 && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="flex items-center gap-1.5 text-muted-foreground">
+                      <DrinkSvgIcon className="w-4 h-4" />
+                      Nước (tổng {formatVND(totals.water)})
+                    </span>
+                    <span className="font-semibold">{formatVND(myCost.waterShare)}</span>
+                  </div>
+                )}
+
+                <div className="text-[10px] text-muted-foreground bg-muted/40 px-2 py-1 rounded-md">
+                  Bạn đánh {myCost.setsPlayed}/{totalSets} séc → chia theo tỉ lệ séc
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <DrinkSvgIcon className="w-4 h-4 shrink-0" />
-                  <div>
-                    <p className="text-[10px] text-muted-foreground">Tiền nước</p>
-                    <p className="font-semibold">{formatVND(payment.other_share)}</p>
-                  </div>
+
+                <Separator />
+
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 font-bold text-sm">
+                    <WalletMoneySvgIcon className="w-4 h-4" /> Bạn cần trả:
+                  </span>
+                  <span className="text-lg font-bold text-emerald-600 dark:text-emerald-400">
+                    {formatVND(myCost.totalShare)}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs text-muted-foreground font-medium">Tổng cộng:</span>{' '}
-                  <span className="font-bold text-primary text-base sm:text-lg">{formatVND(payment.total_amount)}</span>
-                </div>
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2">
+                {/* Detail Dialog */}
+                <Dialog
+                  open={detailDialog === session.id}
+                  onOpenChange={(open) => setDetailDialog(open ? session.id : null)}
+                >
+                  <DialogTrigger className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium border border-input bg-background hover:bg-accent transition-colors flex-1 justify-center">
+                      <Eye className="h-3 w-3" /> Xem chi tiết buổi đánh
+                  </DialogTrigger>
+                  <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                      <DialogTitle className="flex items-center gap-2 text-sm font-bold">
+                        <BadgeInfo className="h-4 w-4 text-emerald-600" />
+                        Chi tiết buổi đánh - {format(new Date(session.date + 'T00:00:00'), 'dd/MM/yyyy')}
+                      </DialogTitle>
+                    </DialogHeader>
 
-                {payment.status === 'PENDING' && (
+                    <div className="space-y-3 py-2">
+                      {/* Session info */}
+                      <div className="p-3 rounded-xl bg-muted/40 text-xs space-y-1">
+                        <p><strong>Sân:</strong> {session.court_name}</p>
+                        <p><strong>Giờ:</strong> {formatTime(session.start_time)} - {formatTime(session.end_time)}</p>
+                        <p><strong>Số người:</strong> {playerCosts.length}</p>
+                        <p><strong>Tổng séc:</strong> {totalSets}</p>
+                      </div>
+
+                      {/* Cost breakdown */}
+                      <div className="p-3 rounded-xl bg-blue-50/60 dark:bg-blue-950/20 border text-xs space-y-1">
+                        <p className="font-semibold text-blue-800 dark:text-blue-300 flex items-center gap-1.5">
+                          <CourtSvgIcon className="w-4 h-4" /> Tiền sân
+                        </p>
+                        <p>{formatVND(detail.courtHourlyRate)}/giờ × {detail.courtHours} giờ = {formatVND(totals.court)}</p>
+                      </div>
+
+                      {detail.shuttlecockTypes.length > 0 && (
+                        <div className="p-3 rounded-xl bg-orange-50/60 dark:bg-orange-950/20 border text-xs space-y-1">
+                          <p className="font-semibold text-orange-800 dark:text-orange-300 flex items-center gap-1.5">
+                            <ShuttlecockSvgIcon className="w-4 h-4" /> Tiền cầu
+                          </p>
+                          {detail.shuttlecockTypes.map((st, i) => (
+                            <p key={i}>
+                              {st.name || `Loại ${i + 1}`}: {st.quantity} quả × {formatVND(st.pricePerUnit)} = {formatVND(st.quantity * st.pricePerUnit)}
+                            </p>
+                          ))}
+                          <p className="font-medium">Tổng: {formatVND(totals.shuttle)}</p>
+                        </div>
+                      )}
+
+                      {totals.water > 0 && (
+                        <div className="p-3 rounded-xl bg-cyan-50/60 dark:bg-cyan-950/20 border text-xs space-y-1">
+                          <p className="font-semibold text-cyan-800 dark:text-cyan-300 flex items-center gap-1.5">
+                            <DrinkSvgIcon className="w-4 h-4" /> Tiền nước
+                          </p>
+                          <p>Tổng: {formatVND(totals.water)}</p>
+                        </div>
+                      )}
+
+                      <div className="p-3 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border">
+                        <p className="text-sm font-bold text-emerald-700 dark:text-emerald-400 flex items-center justify-between">
+                          <span className="flex items-center gap-1.5">
+                            <WalletMoneySvgIcon className="w-4 h-4" /> Tổng chi phí:
+                          </span>
+                          {formatVND(totals.total)}
+                        </p>
+                      </div>
+
+                      <Separator />
+
+                      {/* All players breakdown */}
+                      <p className="font-semibold text-sm flex items-center gap-1">
+                        <Users className="h-4 w-4 text-emerald-600" />
+                        Phân chia cho {playerCosts.length} người
+                      </p>
+
+                      {playerCosts.map((pc) => {
+                        const isMe = pc.userId === userId;
+                        const isWalkIn = pc.userId.startsWith('walkin_');
+                        return (
+                          <div
+                            key={pc.userId}
+                            className={`p-3 rounded-xl border text-xs space-y-1 ${
+                              isMe
+                                ? 'bg-emerald-50/60 dark:bg-emerald-950/20 border-emerald-200/60 ring-1 ring-emerald-400/30'
+                                : 'bg-muted/30'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold text-sm flex items-center gap-1.5">
+                                {isWalkIn && <UserPlus className="h-3.5 w-3.5 text-amber-600" />}
+                                {pc.name}
+                                {isMe && (
+                                  <Badge variant="secondary" className="text-[9px] bg-emerald-100 text-emerald-700 ml-1">
+                                    Bạn
+                                  </Badge>
+                                )}
+                                {isWalkIn && (
+                                  <Badge variant="secondary" className="text-[9px] bg-amber-100 text-amber-600 ml-1">
+                                    Khách
+                                  </Badge>
+                                )}
+                              </span>
+                              <Badge variant="secondary" className="text-[10px]">
+                                {pc.setsPlayed}/{totalSets} séc
+                              </Badge>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 text-muted-foreground">
+                              <span>Sân: {formatVND(pc.courtShare)}</span>
+                              <span>Cầu: {formatVND(pc.shuttleShare)}</span>
+                              <span>Nước: {formatVND(pc.waterShare)}</span>
+                            </div>
+                            <div className={`text-right font-bold text-sm ${isMe ? 'text-emerald-600 dark:text-emerald-400' : ''}`}>
+                              {formatVND(pc.totalShare)}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setDetailDialog(null)}>
+                        Đóng
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {/* Pay Button */}
+                {sessionPayment?.status === 'PENDING' && (
                   <Button
                     size="sm"
-                    className="rounded-full text-xs px-4"
-                    onClick={() => handleMarkPaid(payment.id)}
-                    disabled={loading === payment.id}
+                    className="rounded-full text-xs px-4 bg-emerald-600 hover:bg-emerald-700"
+                    onClick={() => handleMarkPaid(sessionPayment.id)}
+                    disabled={loading === sessionPayment.id}
                   >
-                    {loading === payment.id && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
-                    Tôi đã chuyển khoản
+                    {loading === sessionPayment.id && <Loader2 className="h-3 w-3 animate-spin mr-1" />}
+                    Đã chuyển khoản
                   </Button>
                 )}
               </div>
-            </Card>
-          ))}
+            </div>
+          </Card>
+        );
+      })}
+
+      {/* Sessions without cost data yet (upcoming or admin hasn't entered) */}
+      {sessionsWithoutCosts.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground font-medium">
+            Buổi đánh chưa có chi phí ({sessionsWithoutCosts.length})
+          </p>
+          {sessionsWithoutCosts.map((session) => {
+            const myReg = session.registrations.find((r) => r.user_id === userId);
+            return (
+              <Card key={session.id} className="p-4 opacity-60">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-sm">
+                      {format(new Date(session.date + 'T00:00:00'), 'EEEE, dd/MM', { locale: vi })}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {formatTime(session.start_time)} - {formatTime(session.end_time)} · {session.court_name}
+                      {myReg && ` · ${myReg.sets_played} séc`}
+                    </p>
+                  </div>
+                  <Badge variant="secondary" className="text-[10px]">
+                    Chờ Admin nhập chi phí
+                  </Badge>
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
     </div>

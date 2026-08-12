@@ -56,3 +56,45 @@ export function WalletMoneySvgIcon({ className = "w-6 h-6" }: { className?: stri
     </svg>
   );
 }
+
+export function RecruitMemberSvgIcon({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="26" cy="22" r="10" fill="#10B981" />
+      <path d="M12 50 C12 38, 40 38, 40 50 Z" fill="#059669" />
+      <circle cx="46" cy="26" r="7" fill="#3B82F6" />
+      <path d="M38 52 C38 42, 54 42, 54 52 Z" fill="#2563EB" />
+      <circle cx="48" cy="18" r="5" fill="#F59E0B" />
+      <path d="M48 15 L48 21 M45 18 L51 18" stroke="white" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function MatchVersusSvgIcon({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="32" cy="32" r="28" fill="#F59E0B" opacity="0.2" />
+      {/* Racket 1 */}
+      <path d="M14 48 L28 34" stroke="#EF4444" strokeWidth="4" strokeLinecap="round" />
+      <circle cx="34" cy="28" r="10" stroke="#EF4444" strokeWidth="3" fill="none" />
+      {/* Racket 2 */}
+      <path d="M50 48 L36 34" stroke="#3B82F6" strokeWidth="4" strokeLinecap="round" />
+      <circle cx="30" cy="28" r="10" stroke="#3B82F6" strokeWidth="3" fill="none" />
+      {/* VS Flash */}
+      <path d="M32 14 L26 32 L36 32 L30 50" stroke="#F59E0B" strokeWidth="3" strokeLinejoin="round" fill="none" />
+    </svg>
+  );
+}
+
+export function TrophyStarSvgIcon({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M18 12 H46 V28 C46 38, 38 44, 32 44 C26 44, 18 38, 18 28 Z" fill="#F59E0B" />
+      <path d="M14 16 C8 16, 8 28, 18 28" stroke="#D97706" strokeWidth="3" fill="none" />
+      <path d="M50 16 C56 16, 56 28, 46 28" stroke="#D97706" strokeWidth="3" fill="none" />
+      <rect x="26" y="44" width="12" height="10" fill="#B45309" />
+      <rect x="20" y="54" width="24" height="6" rx="2" fill="#78350F" />
+      <polygon points="32,18 35,24 41,25 37,29 38,35 32,32 26,35 27,29 23,25 29,24" fill="#FEF08A" />
+    </svg>
+  );
+}

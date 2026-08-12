@@ -14,6 +14,7 @@ import {
   LogOut,
   Menu,
   Shield,
+  MessageSquare,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
@@ -41,6 +42,7 @@ interface AdminLayoutShellProps {
 const navItems = [
   { href: '/admin/dashboard', label: 'Tổng quan', icon: LayoutDashboard },
   { href: '/admin/members', label: 'Thành viên', icon: Users },
+  { href: '/admin/posts', label: 'Bài đăng', icon: MessageSquare },
   { href: '/admin/sessions', label: 'Buổi tập', icon: CalendarDays },
   { href: '/admin/schedules', label: 'Lịch cố định', icon: Clock },
   { href: '/admin/payments', label: 'Thanh toán', icon: CreditCard },

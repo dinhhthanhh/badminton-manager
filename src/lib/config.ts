@@ -30,7 +30,26 @@ export const DEFAULT_SETTINGS = {
 
 export type CostCalculationMethod = 'EQUAL' | 'BY_SET' | 'HYBRID';
 
-export type UserRole = 'USER' | 'ADMIN';
+export type UserRole = 'USER' | 'ADMIN' | 'CLUB_OWNER';
+
+export type SkillLevel = 'BEGINNER' | 'AMATEUR' | 'INTERMEDIATE' | 'ADVANCED' | 'EXPERT' | 'PRO';
+
+export const SKILL_LEVEL_LABELS: Record<SkillLevel, { label: string; color: string }> = {
+  BEGINNER: { label: 'Mới chơi', color: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300' },
+  AMATEUR: { label: 'Yếu - Trung bình yếu', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' },
+  INTERMEDIATE: { label: 'Trung bình (Phong trào)', color: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' },
+  ADVANCED: { label: 'Khá - Trung bình khá', color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' },
+  EXPERT: { label: 'Giỏi / Bán chuyên', color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
+  PRO: { label: 'Chuyên nghiệp', color: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+};
+
+export type PostType = 'RECRUIT_MEMBER' | 'FIND_OPPONENT' | 'GENERAL';
+
+export const POST_TYPE_LABELS: Record<PostType, { label: string; badge: string; color: string }> = {
+  RECRUIT_MEMBER: { label: 'Tuyển thành viên CLB', badge: 'Tuyển thành viên', color: 'bg-emerald-500 text-white' },
+  FIND_OPPONENT: { label: 'Tuyển đối giao lưu', badge: 'Tìm đối giao lưu', color: 'bg-blue-500 text-white' },
+  GENERAL: { label: 'Thông báo / Thảo luận', badge: 'Thông báo', color: 'bg-amber-500 text-white' },
+};
 
 export type UserStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'BLOCKED';
 

@@ -4,6 +4,38 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { revalidatePath } from 'next/cache';
 
+// ─── Shuttlecock Type ────────────────────────────────────────────────
+export interface ShuttlecockType {
+  name: string;        // e.g. "Victor AS-30", "Yonex AS-05"
+  quantity: number;    // number of shuttlecocks used
+  pricePerUnit: number; // VND per shuttlecock
+}
+
+// ─── Walk-in Player (not registered but played) ─────────────────────
+export interface WalkInPlayer {
+  id: string;          // generated client-side
+  name: string;
+  setsPlayed: number;
+}
+
+// ─── Session Cost Detail (extended) ─────────────────────────────────
+export interface SessionCostDetail {
+  sessionId: string;
+  // Court
+  courtHourlyRate: number;  // VND per hour
+  courtHours: number;       // e.g. 2 hours
+  // Shuttlecocks (multiple types)
+  shuttlecockTypes: ShuttlecockType[];
+  // Water / drinks
+  waterCost: number;        // total water cost
+  // Walk-in players
+  walkInPlayers: WalkInPlayer[];
+  // Metadata
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+// ─── Legacy Court Bill Types (kept for backwards compat) ────────────
 export interface CourtBillInput {
   date: string;
   sessionId?: string;
@@ -29,6 +61,117 @@ export interface CourtBillRecord {
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   created_at: string;
 }
+
+/**
+ * Save detailed session cost breakdown
+ */
+export async function saveSessionCostDetails(
+  detail: SessionCostDetail
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { success: false, error: 'Chưa đăng nhập' };
+
+    const adminClient = createAdminClient();
+
+    const key = `session_cost_details_${detail.sessionId}`;
+    const payload: SessionCostDetail = {
+      ...detail,
+      updatedAt: new Date().toISOString(),
+      updatedBy: user.id,
+    };
+
+    await adminClient.from('app_settings').upsert({
+      key,
+      value: JSON.stringify(payload),
+      updated_by: user.id,
+    });
+
+    // Also update the session_costs table with computed totals for finalization
+    const courtTotal = detail.courtHourlyRate * detail.courtHours;
+    const shuttlecockTotal = detail.shuttlecockTypes.reduce(
+      (sum, s) => sum + s.quantity * s.pricePerUnit, 0
+    );
+
+    await adminClient.from('session_costs').upsert({
+      session_id: detail.sessionId,
+      court_cost: courtTotal,
+      shuttlecock_cost: shuttlecockTotal,
+      other_cost: detail.waterCost,
+      calculation_method: 'BY_SET',
+    }, { onConflict: 'session_id' });
+
+    revalidatePath('/admin/payments');
+    revalidatePath('/payments');
+    return { success: true };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : 'Lỗi lưu chi phí' };
+  }
+}
+
+/**
+ * Get detailed session cost breakdown
+ */
+export async function getSessionCostDetails(
+  sessionId: string
+): Promise<SessionCostDetail | null> {
+  try {
+    const adminClient = createAdminClient();
+    const key = `session_cost_details_${sessionId}`;
+
+    const { data } = await adminClient
+      .from('app_settings')
+      .select('value')
+      .eq('key', key)
+      .maybeSingle();
+
+    if (data?.value) {
+      const parsed = typeof data.value === 'string'
+        ? JSON.parse(data.value)
+        : data.value;
+      return parsed as SessionCostDetail;
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+}
+
+/**
+ * Get cost details for multiple sessions at once
+ */
+export async function getBatchSessionCostDetails(
+  sessionIds: string[]
+): Promise<Record<string, SessionCostDetail>> {
+  if (sessionIds.length === 0) return {};
+
+  try {
+    const adminClient = createAdminClient();
+    const keys = sessionIds.map((id) => `session_cost_details_${id}`);
+
+    const { data } = await adminClient
+      .from('app_settings')
+      .select('key, value')
+      .in('key', keys);
+
+    const result: Record<string, SessionCostDetail> = {};
+    if (data) {
+      for (const row of data) {
+        const sessionId = row.key.replace('session_cost_details_', '');
+        const parsed = typeof row.value === 'string'
+          ? JSON.parse(row.value)
+          : row.value;
+        result[sessionId] = parsed as SessionCostDetail;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+// ─── Legacy Court Bill Functions (preserved) ────────────────────────
 
 /**
  * Submit court bill by member
@@ -118,8 +261,8 @@ export async function submitCourtBill(input: CourtBillInput): Promise<{ success:
     revalidatePath('/payments');
     revalidatePath('/admin/payments');
     return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Có lỗi xảy ra khi đăng hóa đơn' };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : 'Có lỗi xảy ra khi đăng hóa đơn' };
   }
 }
 
@@ -171,8 +314,8 @@ export async function approveCourtBill(billId: string): Promise<{ success: boole
     revalidatePath('/payments');
     revalidatePath('/admin/payments');
     return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Duyệt hóa đơn thất bại' };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : 'Duyệt hóa đơn thất bại' };
   }
 }
 
@@ -202,7 +345,7 @@ export async function rejectCourtBill(billId: string): Promise<{ success: boolea
     revalidatePath('/payments');
     revalidatePath('/admin/payments');
     return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Từ chối thất bại' };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : 'Từ chối thất bại' };
   }
 }

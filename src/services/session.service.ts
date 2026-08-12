@@ -436,6 +436,95 @@ export async function reopenSession(sessionId: string): Promise<void> {
   revalidatePath(`/admin/sessions/${sessionId}`);
 }
 
+/**
+ * Get sessions within a date range with full details
+ */
+export async function getSessionsForDateRange(
+  dateFrom: string,
+  dateTo: string
+): Promise<SessionWithDetails[]> {
+  const adminClient = createAdminClient();
+
+  const { data, error } = await adminClient
+    .from('sessions')
+    .select(`
+      *,
+      registrations (
+        *,
+        profiles:user_id (
+          id,
+          full_name,
+          avatar_url,
+          email
+        )
+      ),
+      session_costs (*)
+    `)
+    .gte('date', dateFrom)
+    .lte('date', dateTo)
+    .neq('status', 'CANCELLED')
+    .order('date', { ascending: true })
+    .order('start_time', { ascending: true });
+
+  if (error) {
+    console.error('[getSessionsForDateRange] Error:', error);
+    return [];
+  }
+
+  return (data || []).map(mapSessionWithDetails);
+}
+
+/**
+ * Add a walk-in player to a session (admin only)
+ * Creates a registration with ATTENDED status for an existing user
+ */
+export async function addWalkInPlayerToSession(
+  sessionId: string,
+  userId: string,
+  setsPlayed: number
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { success: false, error: 'Not authenticated' };
+
+    const adminClient = createAdminClient();
+
+    // Check if registration already exists
+    const { data: existing } = await adminClient
+      .from('registrations')
+      .select('id, status')
+      .eq('session_id', sessionId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (existing) {
+      // Update existing to ATTENDED
+      await adminClient
+        .from('registrations')
+        .update({ status: 'ATTENDED', sets_played: setsPlayed })
+        .eq('id', existing.id);
+    } else {
+      // Create new registration as ATTENDED
+      await adminClient
+        .from('registrations')
+        .insert({
+          session_id: sessionId,
+          user_id: userId,
+          status: 'ATTENDED',
+          sets_played: setsPlayed,
+          registered_at: new Date().toISOString(),
+        });
+    }
+
+    revalidatePath(`/admin/sessions/${sessionId}`);
+    revalidatePath('/admin/payments');
+    return { success: true };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : 'Thêm thất bại' };
+  }
+}
+
 function mapSessionWithDetails(data: Record<string, unknown>): SessionWithDetails {
   const registrations = (data.registrations as RegistrationWithProfile[]) || [];
   const activeRegistrations = registrations.filter(

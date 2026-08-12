@@ -7,7 +7,11 @@ import type {
   PaymentStatus,
   CostCalculationMethod,
   NotificationType,
+  SkillLevel,
+  PostType,
 } from '@/lib/config';
+
+export type { SkillLevel, PostType };
 
 // ─── Profile ────────────────────────────────────────────────────────
 export interface Profile {
@@ -17,8 +21,89 @@ export interface Profile {
   avatar_url: string | null;
   role: UserRole;
   status: UserStatus;
+  skill_level?: SkillLevel;
+  play_frequency?: string;
+  preferred_time_slots?: string[];
+  bio?: string;
   created_at: string;
   updated_at: string;
+}
+
+// ─── Club ───────────────────────────────────────────────────────────
+export interface Club {
+  id: string;
+  name: string;
+  description: string;
+  avatar_url: string | null;
+  owner_id: string;
+  status: 'ACTIVE' | 'SUSPENDED' | 'DELETED';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClubMember {
+  id: string;
+  club_id: string;
+  user_id: string;
+  role: 'OWNER' | 'ADMIN' | 'MEMBER';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  invited_by: string | null;
+  joined_at: string | null;
+  created_at: string;
+  profiles?: Pick<Profile, 'id' | 'full_name' | 'avatar_url' | 'email' | 'skill_level'>;
+  clubs?: Pick<Club, 'id' | 'name' | 'avatar_url' | 'description'>;
+}
+
+// ─── Post ───────────────────────────────────────────────────────────
+export interface Post {
+  id: string;
+  author_id: string;
+  club_id: string | null;
+  type: PostType;
+  title: string;
+  content: string;
+  skill_level_required: string | null;
+  preferred_time: string | null;
+  location: string | null;
+  contact_info: string | null;
+  status: 'ACTIVE' | 'PENDING_REVIEW' | 'HIDDEN' | 'DELETED';
+  view_count: number;
+  created_at: string;
+  updated_at: string;
+  author?: Pick<Profile, 'id' | 'full_name' | 'avatar_url' | 'skill_level'>;
+  club?: Pick<Club, 'id' | 'name' | 'avatar_url'>;
+}
+
+// ─── Rating ─────────────────────────────────────────────────────────
+export interface Rating {
+  id: string;
+  rater_id: string;
+  rated_user_id: string;
+  session_id: string | null;
+  club_id: string | null;
+  stars: number;
+  comment: string;
+  proof_note?: string;
+  status: 'PENDING_APPROVAL' | 'VERIFIED' | 'REJECTED';
+  verified_at?: string | null;
+  categories: {
+    punctuality?: number;
+    payment?: number;
+    sportsmanship?: number;
+  };
+  created_at: string;
+  rater?: Pick<Profile, 'id' | 'full_name' | 'avatar_url'>;
+  session?: {
+    id: string;
+    date: string;
+    start_time: string;
+    end_time: string;
+    court_name: string;
+  };
+  club?: {
+    id: string;
+    name: string;
+  };
 }
 
 // ─── Recurring Schedule ──────────────────────────────────────────────

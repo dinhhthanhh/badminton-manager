@@ -12,6 +12,10 @@ import {
   LogOut,
   Menu,
   ShieldCheck,
+  Compass,
+  UserSearch,
+  Crown,
+  Building2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
@@ -32,6 +36,9 @@ interface UserLayoutShellProps {
 
 const navItems = [
   { href: '/schedule', label: 'Lịch thi đấu', icon: CalendarDays },
+  { href: '/explore', label: 'Bài đăng & Giao lưu', icon: Compass },
+  { href: '/explore/users', label: 'Tìm người chơi', icon: UserSearch },
+  { href: '/clubs', label: 'CLB của tôi', icon: Building2 },
   { href: '/payments', label: 'Thanh toán', icon: CreditCard },
   { href: '/history', label: 'Lịch sử', icon: History },
   { href: '/profile', label: 'Hồ sơ', icon: User },
